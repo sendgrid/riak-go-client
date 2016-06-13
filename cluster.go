@@ -26,6 +26,22 @@ type ClusterOptions struct {
 	QueueExecutionInterval time.Duration
 }
 
+// ClusterStats object contains node statistics, and the total execution retries, failures, and successes
+type ClusterStats struct {
+	NodeStats          map[string]NodeStats
+	ExecutionRetries   int32
+	ExecutionFailures  int32
+	ExecutionSuccesses int32
+	sync.Mutex
+}
+
+// NodeStats contains the current number of used connections, max, and min
+type NodeStats struct {
+	CurrentConnections uint16
+	MaxConnections     uint16
+	MinConnections     uint16
+}
+
 // Cluster object contains your pool of Node objects, the NodeManager and the
 // current stateData object of the cluster
 type Cluster struct {
@@ -36,6 +52,7 @@ type Cluster struct {
 	queueCommands      bool
 	cq                 *queue
 	commandQueueTicker *time.Ticker
+	stats              *ClusterStats
 	sync.Mutex
 	stateData
 }
@@ -73,6 +90,7 @@ func NewCluster(options *ClusterOptions) (*Cluster, error) {
 	c := &Cluster{
 		executionAttempts: options.ExecutionAttempts,
 		nodeManager:       options.NodeManager,
+		stats:             &ClusterStats{},
 	}
 	c.initStateData("clusterCreated", "clusterRunning", "clusterShuttingDown", "clusterShutdown", "clusterError")
 
@@ -317,6 +335,9 @@ func (c *Cluster) execute(async *Async) {
 			// NB: "executed" means that a node sent the data to Riak and received a response
 			if err == nil {
 				// No need to re-try
+				c.stats.Lock()
+				defer c.stats.Unlock()
+				c.stats.ExecutionSuccesses = c.stats.ExecutionSuccesses + 1
 				logDebug("[Cluster]", "successfully executed cmd '%s'", cmd.Name())
 				break
 			} else {
@@ -344,9 +365,15 @@ func (c *Cluster) execute(async *Async) {
 		logDebug("[Cluster]", "cmd %s tries: %d", cmd.Name(), tries)
 
 		if tries > 0 {
+			c.stats.Lock()
+			defer c.stats.Unlock()
+			c.stats.ExecutionRetries = c.stats.ExecutionRetries + 1
 			cmd.onRetry()
 			async.onRetry()
 		} else {
+			c.stats.Lock()
+			defer c.stats.Unlock()
+			c.stats.ExecutionFailures = c.stats.ExecutionFailures + 1
 			err = newClientError(ErrClusterNoNodesAvailable, err)
 		}
 	}
@@ -411,4 +438,19 @@ func (c *Cluster) executeEnqueuedCommands() {
 			}
 		}
 	}
+}
+
+func (c *Cluster) GetStats() ClusterStats {
+	result := ClusterStats{NodeStats: make(map[string]NodeStats)}
+	for _, node := range c.nodes {
+		node.cm.connectionCounter.RLock()
+		defer node.cm.connectionCounter.RUnlock()
+		result.NodeStats[node.addr.String()] = NodeStats{CurrentConnections: node.cm.connectionCounter.value, MaxConnections: node.cm.maxConnections, MinConnections: node.cm.minConnections}
+	}
+	c.stats.Lock()
+	defer c.stats.Unlock()
+	result.ExecutionRetries = c.stats.ExecutionRetries
+	result.ExecutionFailures = c.stats.ExecutionFailures
+	result.ExecutionSuccesses = c.stats.ExecutionSuccesses
+	return result
 }
