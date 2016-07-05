@@ -332,9 +332,7 @@ func (c *Cluster) execute(async *Async) {
 			// NB: "executed" means that a node sent the data to Riak and received a response
 			if err == nil {
 				// No need to re-try
-				c.stats.Lock()
-				defer c.stats.Unlock()
-				c.stats.ExecutionSuccesses = c.stats.ExecutionSuccesses + 1
+				c.incrementStats(1, 0, 0)
 				logDebug("[Cluster]", "successfully executed cmd '%s'", cmd.Name())
 				break
 			} else {
@@ -363,21 +361,25 @@ func (c *Cluster) execute(async *Async) {
 		logDebug("[Cluster]", "cmd %s tries: %d", cmd.Name(), tries)
 
 		if tries > 0 {
-			c.stats.Lock()
-			defer c.stats.Unlock()
-			c.stats.ExecutionRetries = c.stats.ExecutionRetries + 1
+			c.incrementStats(0, 1, 0)
 			cmd.onRetry()
 			async.onRetry()
 		} else {
-			c.stats.Lock()
-			defer c.stats.Unlock()
-			c.stats.ExecutionFailures = c.stats.ExecutionFailures + 1
+			c.incrementStats(0, 0, 1)
 			err = newClientError(ErrClusterNoNodesAvailable, err)
 		}
 	}
 	if !enqueued {
 		async.done(err)
 	}
+}
+
+func (c *Cluster) incrementStats(successes int32, retries int32, failures int32) {
+	c.stats.Lock()
+	defer c.stats.Unlock()
+	c.stats.ExecutionFailures = c.stats.ExecutionFailures + failures
+	c.stats.ExecutionRetries = c.stats.ExecutionRetries + retries
+	c.stats.ExecutionSuccesses = c.stats.ExecutionSuccesses + successes
 }
 
 func (c *Cluster) enqueueCommand(async *Async) error {
